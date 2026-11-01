@@ -2,365 +2,155 @@
 
 [中文](#中文) | [English](#english)
 
-Reset Patches' first encounter in Murkwater Cave after accidentally killing him, allowing the chest, fight, surrender, and friendly outcome to be played again.
-
-> This is not a full save rollback or a general NPC revival tool.
+A one-file save repair tool for replaying Patches' first Murkwater Cave encounter after accidentally killing him.
 
 ---
 
 ## 中文
 
-### 功能与支持范围
+### 功能
 
-修复误杀帕奇后的蒙流洞窟初遇状态，让玩家重新完成：
+误杀帕奇后，重置蒙流洞窟初遇：
 
 ```text
-打开宝箱 -> 帕奇出现 -> Boss 战 -> 约半血停手 -> 帕奇投降并存活
+打开宝箱 -> 帕奇出现 -> 战斗 -> 约半血停手 -> 帕奇投降并存活
 ```
 
-| 项目 | 已验证环境 |
-| --- | --- |
-| 平台 | Windows PC / Steam |
-| 游戏版本 | App Ver. 1.17.2 |
-| 存档版本 | 262 |
-| 角色槽位 | Slot 0（`--slot 0`） |
-| Python | 3.12，仅使用标准库 |
+**仅验证以下环境：**
 
-其他版本、平台和角色槽位尚未完成实际验证。
+- Windows / Steam
+- 标题画面 App Ver. 1.17.2
+- 存档版本 262
+- 第一个角色槽位（Slot 0）
+- Python 3.12
 
-### 风险
+其他版本或角色槽位请勿使用。
 
-- 操作前必须完全退出游戏，确认 `eldenring.exe` 已结束。
-- 必须同时备份 `ER0000.sl2` 和 `ER0000.sl2.bak`。
-- 建议暂时关闭 Steam 云同步，并离线完成首次测试。
-- 不要直接覆盖原存档，应先生成并检查候选文件。
-- 本工具不修改游戏 EXE，但无法保证修改存档不存在在线服务风险。
-- 如果游戏或存档版本与已验证环境不同，请停止使用。
+### 使用方法
+
+1. 在游戏标题画面确认显示 **App Ver. 1.17.2**。
+2. 完全退出游戏。脚本检测到 `eldenring.exe` 时会停止。
+3. 安装 [Python](https://www.python.org/downloads/windows/)，安装时勾选 **Add Python to PATH**。
+4. 下载本项目中的 `reset_patches_encounter.py`。
+5. 在脚本文件夹打开 PowerShell，运行：
+
+```powershell
+python .\reset_patches_encounter.py
+```
+
+按提示输入 `1.17.2`。如果有多个 Steam 账号，再选择正确的存档。
+
+脚本会自动查找并验证存档、分别备份主档和 `.bak`、生成修复文件、自检并完成替换。**出现 `[3/4]` 后，不要启动游戏、强制关闭脚本或关闭电脑，直到显示 `[4/4]`。**
+
+### 游戏内验证
+
+1. 启动游戏，进入第一个角色。
+2. 前往蒙流洞窟并打开宝箱。
+3. 将帕奇打到约半血后立即停手。
+4. 等待投降台词，确认帕奇存活。
+5. 退出到标题画面，再完全退出游戏。
+6. 运行只读验证：
+
+```powershell
+python .\reset_patches_encounter.py --verify
+```
+
+看到“验证成功”才表示投降状态已经写入磁盘。
+
+### 备份与回滚
+
+备份目录会显示在脚本结果中，也可在这里找到：
+
+```text
+%APPDATA%\EldenRing\PatchesEncounterResetBackups\<时间戳>
+```
+
+需要回滚时，完全退出游戏，先确认备份中同时存在 `ER0000.sl2` 和 `ER0000.sl2.bak`，并用 `Get-FileHash` 与 `repair_report.json` 中的两个原始 SHA-256 核对。然后把两份文件**一起**复制回原来的数字 SteamID 存档目录，复制后再次比较哈希。
 
 ### 原理
 
-普通 Boss 复活工具通常只清除地图完成位 `31000800`，因此宝箱可能重新可用，但帕奇仍不出现。
+只清除普通 Boss 完成状态只能重置宝箱，帕奇仍可能保持死亡状态。本工具会为当前存档动态定位旗标 family，重置帕奇的 NPC、宝箱、战斗和对话状态，并重新计算角色槽位 MD5。它不会回滚整个世界，也不会复活其他 NPC。
 
-在 1.17.2 的 `m31_00_00_00` 事件脚本中，事件 `31002810` 会检查：
+### 风险
 
-- `31000800`：初遇完成
-- `3683`：帕奇死亡
-- `3691`：帕奇后续状态之一
-
-任一条件为真时，游戏都会禁用帕奇实体。即使清除了 `31000800`，只要 `3683` 或 `3691` 仍为真，游戏还会重新设置完成位。
-
-本工具会动态定位 EventFlags，而不是依赖固定文件绝对偏移，然后重置帕奇的 NPC 状态、蒙流洞窟初遇、宝箱、战斗、对话及相关奖励状态，并重新计算目标角色槽位的 MD5。
-
-它不会让整个世界回到十分钟前，也不会恢复其他 NPC。
-
-### 使用教程
-
-#### 1. 准备环境
-
-将两个脚本放在同一目录：
-
-```text
-inspect_patches.py
-reset_patches_encounter.py
-```
-
-检查 Python：
-
-```powershell
-python --version
-```
-
-#### 2. 找到存档并退出游戏
-
-Steam 版默认存档位置：
-
-```text
-%APPDATA%\EldenRing\<SteamID>\ER0000.sl2
-```
-
-确认游戏未运行：
-
-```powershell
-Get-Process eldenring -ErrorAction SilentlyContinue
-```
-
-命令没有输出才表示进程已经结束。
-
-#### 3. 备份
-
-把 `<SteamID>` 替换为自己的数字目录：
-
-```powershell
-$saveDir = "$env:APPDATA\EldenRing\<SteamID>"
-$backupDir = Join-Path $env:APPDATA ("EldenRing\patches-backup-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
-New-Item -ItemType Directory -Path $backupDir
-Copy-Item "$saveDir\ER0000.sl2" "$backupDir\ER0000.sl2"
-Copy-Item "$saveDir\ER0000.sl2.bak" "$backupDir\ER0000.sl2.bak"
-```
-
-确认备份目录中同时存在两份文件。建议使用 `Get-FileHash` 比较原文件与备份的 SHA-256。
-
-#### 4. 检查原存档
-
-```powershell
-python .\inspect_patches.py "$env:APPDATA\EldenRing\<SteamID>\ER0000.sl2"
-```
-
-`md5_valid` 必须为 `true`。如果 MD5 无效或工具无法定位 EventFlags，请停止操作。
-
-#### 5. 生成候选存档
-
-```powershell
-python .\reset_patches_encounter.py `
-  "$env:APPDATA\EldenRing\<SteamID>\ER0000.sl2" `
-  ".\ER0000_patches_reset.sl2" `
-  --slot 0
-```
-
-脚本不会自动替换正式存档。输出报告中的 `md5_verified` 必须为 `true`。
-
-#### 6. 检查候选存档
-
-```powershell
-python .\inspect_patches.py .\ER0000_patches_reset.sl2
-```
-
-预期关键状态：
-
-```text
-3682 = true
-3683 = false
-3685 = true
-3691 = false
-31000800 = false
-31000801 = false
-31000850 = false
-md5_valid = true
-```
-
-#### 7. 安装候选存档
-
-再次确认游戏已退出且备份存在，然后同时替换主档和 `.bak`：
-
-```powershell
-$saveDir = "$env:APPDATA\EldenRing\<SteamID>"
-Copy-Item .\ER0000_patches_reset.sl2 "$saveDir\ER0000.sl2" -Force
-Copy-Item .\ER0000_patches_reset.sl2 "$saveDir\ER0000.sl2.bak" -Force
-```
-
-如果任一复制失败，不要启动游戏，立即恢复两份备份。
-
-#### 8. 游戏内验证
-
-1. 进入蒙流洞窟并打开宝箱。
-2. 确认帕奇出现并进入 Boss 战。
-3. 打到约半血后立即停止攻击。
-4. 等待投降台词和战斗结束。
-5. 确认帕奇存活且可以友好对话。
-6. 退出到标题画面，让游戏写回存档。
-7. 完全退出游戏后再次运行检查器。
-
-成功写回后的实测状态：
-
-```text
-3680 = true
-3682 = false
-3683 = false
-31000800 = true
-31000801 = false
-31000850 = false
-```
-
-### 回滚
-
-完全退出游戏后，把备份目录中的两个文件一起恢复：
-
-```powershell
-$saveDir = "$env:APPDATA\EldenRing\<SteamID>"
-$backupDir = "<你的备份目录>"
-Copy-Item "$backupDir\ER0000.sl2" "$saveDir\ER0000.sl2" -Force
-Copy-Item "$backupDir\ER0000.sl2.bak" "$saveDir\ER0000.sl2.bak" -Force
-```
-
-不要只恢复其中一个文件，也不要在游戏运行时回滚。
+- 修改存档始终存在风险，请保留自动备份。
+- 建议暂时关闭 Steam 云同步，并离线完成第一次测试。
+- 脚本只能自动检查存档版本；标题画面的 App Ver. 必须由你确认。
+- 本工具不修改游戏 EXE，但无法保证不存在在线服务风险。
 
 ---
 
 ## English
 
-### Features and compatibility
+### What it does
 
-Repairs Patches' first encounter in Murkwater Cave after an accidental kill, allowing the player to replay:
+Resets Patches' first Murkwater Cave encounter after an accidental kill:
 
 ```text
-Open chest -> Patches appears -> Boss fight -> Stop near half health -> Surrender and survival
+Open chest -> Patches appears -> Fight -> Stop near half health -> Patches surrenders and survives
 ```
 
-| Item | Tested environment |
-| --- | --- |
-| Platform | Windows PC / Steam |
-| Game version | App Ver. 1.17.2 |
-| Save version | 262 |
-| Character slot | Slot 0 (`--slot 0`) |
-| Python | 3.12, standard library only |
+**Tested only with:**
 
-Other versions, platforms, and character slots have not been fully tested.
+- Windows / Steam
+- Title-screen App Ver. 1.17.2
+- Save version 262
+- First character slot (Slot 0)
+- Python 3.12
 
-### Risks
-
-- Fully close the game and confirm that `eldenring.exe` is no longer running.
-- Back up both `ER0000.sl2` and `ER0000.sl2.bak`.
-- Temporarily disable Steam Cloud and perform the first test offline.
-- Generate and inspect a separate candidate before replacing the live save.
-- The tool does not modify the game executable, but no guarantee can be made regarding online-service risk.
-- Stop if your game or save version differs from the tested environment.
-
-### How it works
-
-Generic boss-revival tools often clear only `31000800`, the map completion flag. This can reset the chest while Patches remains absent.
-
-In the App Ver. 1.17.2 `m31_00_00_00` event script, event `31002810` checks:
-
-- `31000800`: encounter completed
-- `3683`: Patches dead
-- `3691`: a later Patches state
-
-If any condition is enabled, the game disables Patches' entity. If `31000800` is cleared while `3683` or `3691` remains enabled, the game can set the completion flag again.
-
-The tool dynamically locates EventFlags instead of relying on one fixed absolute file offset. It resets the relevant NPC, encounter, chest, battle, dialogue, and reward states, then recalculates the MD5 checksum for the selected character slot.
-
-It does not roll the entire save back in time or revive unrelated NPCs.
+Do not use it with other versions or character slots.
 
 ### Usage
 
-#### 1. Requirements
+1. Confirm that the title screen shows **App Ver. 1.17.2**.
+2. Fully close the game. The script stops if `eldenring.exe` is running.
+3. Install [Python](https://www.python.org/downloads/windows/) and enable **Add Python to PATH**.
+4. Download `reset_patches_encounter.py` from this project.
+5. Open PowerShell in the script folder and run:
 
-Keep both scripts in the same directory:
+```powershell
+python .\reset_patches_encounter.py
+```
+
+Type `1.17.2` when asked. If multiple Steam accounts are found, select the correct save.
+
+The script automatically finds and validates the save, backs up the main file and `.bak` separately, builds and verifies the repair, and installs both files. **After `[3/4]` appears, do not launch the game, force-close the script, or shut down the PC until `[4/4]` is shown.**
+
+### Verify in game
+
+1. Launch the game and load the first character.
+2. Enter Murkwater Cave and open the chest.
+3. Stop attacking Patches at approximately half health.
+4. Wait for the surrender dialogue and confirm that he survives.
+5. Return to the title screen, then fully close the game.
+6. Run the read-only verification:
+
+```powershell
+python .\reset_patches_encounter.py --verify
+```
+
+The surrender state is confirmed on disk only when the script reports success.
+
+### Backup and rollback
+
+The script prints the backup directory. Backups are also stored under:
 
 ```text
-inspect_patches.py
-reset_patches_encounter.py
+%APPDATA%\EldenRing\PatchesEncounterResetBackups\<timestamp>
 ```
 
-Check Python:
+To roll back, fully close the game. Confirm that the backup contains both `ER0000.sl2` and `ER0000.sl2.bak`, then use `Get-FileHash` to compare them with the two original SHA-256 values in `repair_report.json`. Copy **both** files into the original numeric SteamID save directory and compare the hashes again.
 
-```powershell
-python --version
-```
+### How it works
 
-#### 2. Locate the save and close the game
+Clearing only the generic boss-completion state can reset the chest while leaving Patches dead. This tool dynamically resolves the flag families for the current save, resets the related NPC, chest, battle, and dialogue states, and recalculates the character-slot MD5. It does not roll back the entire world or revive unrelated NPCs.
 
-Default Steam save location:
+### Risks
 
-```text
-%APPDATA%\EldenRing\<SteamID>\ER0000.sl2
-```
-
-Confirm that the game is not running:
-
-```powershell
-Get-Process eldenring -ErrorAction SilentlyContinue
-```
-
-No output means the process has stopped.
-
-#### 3. Back up both files
-
-Replace `<SteamID>` with your numeric directory name:
-
-```powershell
-$saveDir = "$env:APPDATA\EldenRing\<SteamID>"
-$backupDir = Join-Path $env:APPDATA ("EldenRing\patches-backup-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
-New-Item -ItemType Directory -Path $backupDir
-Copy-Item "$saveDir\ER0000.sl2" "$backupDir\ER0000.sl2"
-Copy-Item "$saveDir\ER0000.sl2.bak" "$backupDir\ER0000.sl2.bak"
-```
-
-Confirm that both files exist in the backup directory. Comparing the source and backup SHA-256 values with `Get-FileHash` is recommended.
-
-#### 4. Inspect the original save
-
-```powershell
-python .\inspect_patches.py "$env:APPDATA\EldenRing\<SteamID>\ER0000.sl2"
-```
-
-`md5_valid` must be `true`. Stop if the checksum is invalid or EventFlags cannot be located.
-
-#### 5. Create a repaired candidate
-
-```powershell
-python .\reset_patches_encounter.py `
-  "$env:APPDATA\EldenRing\<SteamID>\ER0000.sl2" `
-  ".\ER0000_patches_reset.sl2" `
-  --slot 0
-```
-
-The script does not replace the live save automatically. The report must show `md5_verified: true`.
-
-#### 6. Inspect the candidate
-
-```powershell
-python .\inspect_patches.py .\ER0000_patches_reset.sl2
-```
-
-Expected key states:
-
-```text
-3682 = true
-3683 = false
-3685 = true
-3691 = false
-31000800 = false
-31000801 = false
-31000850 = false
-md5_valid = true
-```
-
-#### 7. Install the candidate
-
-Confirm that the game is closed and your backups exist, then replace both files:
-
-```powershell
-$saveDir = "$env:APPDATA\EldenRing\<SteamID>"
-Copy-Item .\ER0000_patches_reset.sl2 "$saveDir\ER0000.sl2" -Force
-Copy-Item .\ER0000_patches_reset.sl2 "$saveDir\ER0000.sl2.bak" -Force
-```
-
-If either copy fails, do not launch the game. Restore both backup files immediately.
-
-#### 8. Verify in game
-
-1. Enter Murkwater Cave and open the chest.
-2. Confirm that Patches appears and the boss fight starts.
-3. Stop attacking at approximately half health.
-4. Wait for the surrender dialogue and the fight to end.
-5. Confirm that Patches remains alive and friendly.
-6. Return to the title screen so the game writes the save.
-7. Fully close the game and inspect the save again.
-
-Verified post-surrender state:
-
-```text
-3680 = true
-3682 = false
-3683 = false
-31000800 = true
-31000801 = false
-31000850 = false
-```
-
-### Rollback
-
-Fully close the game, then restore both files from your backup directory:
-
-```powershell
-$saveDir = "$env:APPDATA\EldenRing\<SteamID>"
-$backupDir = "<your backup directory>"
-Copy-Item "$backupDir\ER0000.sl2" "$saveDir\ER0000.sl2" -Force
-Copy-Item "$backupDir\ER0000.sl2.bak" "$saveDir\ER0000.sl2.bak" -Force
-```
-
-Never restore only one file, and never roll back while the game is running.
+- Save editing always carries risk. Keep the automatic backup.
+- Temporarily disable Steam Cloud and perform the first test offline.
+- The script can verify only the save version; you must confirm the title-screen App Ver.
+- The tool does not modify the game executable, but no guarantee can be made regarding online-service risk.
 
 ---
 
