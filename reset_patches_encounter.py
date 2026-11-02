@@ -22,6 +22,7 @@ SLOT_RECORD_SIZE = 0x10 + SLOT_SIZE
 SLOT_COUNT = 10
 GA_ITEMS_MAX = 0x1400
 SUPPORTED_SAVE_VERSION = 262
+SUPPORTED_APP_VERSION = "1.17.2"
 USER_DATA10_CHECKSUM_OFFSET = 0x19003A0
 USER_DATA10_DATA_OFFSET = 0x19003B0
 USER_DATA10_SIZE = 0x60000
@@ -30,6 +31,7 @@ USER_DATA11_DATA_OFFSET = USER_DATA11_CHECKSUM_OFFSET + 0x10
 PROFILE_NAME_START = 0x1901D0E
 PROFILE_NAME_STRIDE = 588
 PROFILE_NAME_SIZE = 32
+PROFILE_LEVEL_OFFSET = 0x22
 STEAMID64_MIN = 0x0110000100000000
 STEAMID64_MAX = STEAMID64_MIN + (1 << 32)
 ORIGIN_PROBE_START = 50_000
@@ -179,6 +181,44 @@ def choose_save(saves: list[Path]) -> Path:
         print("输入无效，请重试。/ Invalid selection, try again.")
 
 
+def discover_local_steam_ids() -> list[int]:
+    appdata = os.environ.get("APPDATA")
+    if not appdata:
+        raise RepairError("APPDATA is unavailable; the local SteamID cannot be detected.")
+    root = Path(appdata) / "EldenRing"
+    if not root.is_dir():
+        raise RepairError(f"未找到存档目录 / Save directory not found: {root}")
+    steam_ids = []
+    for directory in root.iterdir():
+        if directory.is_dir() and directory.name.isdigit():
+            steam_id = int(directory.name)
+            if STEAMID64_MIN <= steam_id < STEAMID64_MAX:
+                steam_ids.append(steam_id)
+    return sorted(set(steam_ids))
+
+
+def choose_local_steam_id() -> int:
+    steam_ids = discover_local_steam_ids()
+    if not steam_ids:
+        raise RepairError(
+            "当前环境没有数字 SteamID 存档目录。/ No local SteamID save directory was found."
+        )
+    if len(steam_ids) == 1:
+        print(f"自动使用当前环境 SteamID64：{steam_ids[0]}")
+        print(f"Automatically using local SteamID64: {steam_ids[0]}")
+        return steam_ids[0]
+    print("检测到多个本地 SteamID / Multiple local SteamIDs found:")
+    for index, steam_id in enumerate(steam_ids, 1):
+        save = Path(os.environ["APPDATA"]) / "EldenRing" / str(steam_id) / "ER0000.sl2"
+        state = "save found" if save.is_file() else "directory only"
+        print(f"  {index}. {steam_id} ({state})")
+    while True:
+        answer = prompt_user("请选择编号 / Select a number: ")
+        if answer.isdigit() and 1 <= int(answer) <= len(steam_ids):
+            return steam_ids[int(answer) - 1]
+        print("输入无效，请重试。/ Invalid selection, try again.")
+
+
 def slot_summaries(data: bytes) -> list[dict]:
     summaries = []
     for index in range(SLOT_COUNT):
@@ -190,9 +230,11 @@ def slot_summaries(data: bytes) -> list[dict]:
         name_start = PROFILE_NAME_START + index * PROFILE_NAME_STRIDE
         raw_name = data[name_start:name_start + PROFILE_NAME_SIZE]
         name = raw_name.decode("utf-16le", errors="replace").split("\0", 1)[0]
+        level = struct.unpack_from("<i", data, name_start + PROFILE_LEVEL_OFFSET)[0]
         summaries.append({
             "slot": index,
             "name": name,
+            "level": level,
             "version": u32(slot, 0),
             "md5_valid": hashlib.md5(slot).digest() == data[record_start:slot_start],
         })
@@ -208,7 +250,7 @@ def print_slot_summaries(data: bytes) -> list[dict]:
         state = "MD5 OK" if entry["md5_valid"] else "MD5 INVALID"
         print(
             f"  Slot {entry['slot']}: {entry['name'] or '(unnamed)'} | "
-            f"version {entry['version']} | {state}"
+            f"等级 / Level {entry['level']} | version {entry['version']} | {state}"
         )
     return summaries
 
@@ -653,7 +695,7 @@ def verify_post_surrender(save: Path, slot_index: int) -> None:
     print("验证成功：帕奇已存活并完成投降写回。/ Verified: Patches survived and the surrender state was saved.")
 
 
-def run(save: Path, slot_index: int, confirmed_app_version: str | None = None) -> Path:
+def run(save: Path, slot_index: int) -> Path:
     validate_save_path(save)
     backup_save = save.with_name("ER0000.sl2.bak")
     if not backup_save.is_file():
@@ -666,18 +708,6 @@ def run(save: Path, slot_index: int, confirmed_app_version: str | None = None) -
         print(f"  {stat.st_size / 1024 / 1024:.1f} MiB | {modified} | SHA-256 {sha256(path)}")
     print("注意：.bak 会先被单独备份，再由主档生成的修复候选覆盖。")
     print("Note: .bak is backed up separately, then replaced with the candidate built from Main.")
-    print(f"脚本会验证 save version 262 和 Slot {slot_index}，但无法自动读取标题画面的 App Ver。")
-    print(
-        f"The script verifies save version 262 and Slot {slot_index}, "
-        "but cannot detect the title-screen App Ver."
-    )
-    version = confirmed_app_version or prompt_user(
-        "请先确认标题画面显示 App Ver. 1.17.2，然后输入 1.17.2：\n"
-        "Confirm the title screen says App Ver. 1.17.2, then type 1.17.2: "
-    )
-    if version != "1.17.2":
-        raise RepairError("未确认 App Ver. 1.17.2，已取消。/ App Ver. 1.17.2 was not confirmed; cancelled.")
-
     print("正在验证主档与 .bak / Validating the main save and .bak...")
     prepare_slot(save.read_bytes(), slot_index)
     prepare_slot(backup_save.read_bytes(), slot_index)
@@ -694,7 +724,8 @@ def run(save: Path, slot_index: int, confirmed_app_version: str | None = None) -
     report.update({
         "source": str(save), "backup_directory": str(backup_dir),
         "source_sha256": original_main_hash, "source_bak_sha256": original_bak_hash,
-        "candidate_sha256": sha256(candidate_path), "confirmed_app_version": version,
+        "candidate_sha256": sha256(candidate_path),
+        "supported_app_version": SUPPORTED_APP_VERSION,
     })
     (backup_dir / "repair_report.json").write_text(
         json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -715,31 +746,41 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Reset Patches' first Murkwater Cave encounter safely.")
     parser.add_argument("--save", type=Path, help="Optional source ER0000.sl2; normally found automatically.")
     parser.add_argument("--slot", type=int, choices=range(SLOT_COUNT), help="Character Slot number (0-9).")
-    parser.add_argument("--assume-app-version", choices=["1.17.2"], help="Caller assertion for the title-screen App Ver; the EXE is not inspected.")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--verify", action="store_true", help="Read only: verify the selected slot's post-surrender state.")
-    mode.add_argument("--list-slots", action="store_true", help="Read only: list occupied character slots and versions.")
+    mode.add_argument("--list-slots", action="store_true", help="Read only: list occupied character slots, levels, and versions.")
+    mode.add_argument("--resign", action="store_true", help="Create a separately re-signed save using the local SteamID64.")
     mode.add_argument("--resign-to", type=int, metavar="STEAMID64", help="Create a separately re-signed save for this SteamID64.")
-    parser.add_argument("--output", type=Path, help="Output path for --resign-to; source is never overwritten.")
+    parser.add_argument("--output", type=Path, help="Output path for --resign/--resign-to; source is never overwritten.")
     args = parser.parse_args()
     exit_code = 0
     try:
         require_game_closed()
-        if args.resign_to is not None:
+        if args.resign or args.resign_to is not None:
             save = (
                 args.save.expanduser().resolve()
                 if args.save is not None
                 else choose_save(discover_saves(None)).resolve()
             )
             if args.slot is not None:
-                raise RepairError("--slot 不能与 --resign-to 同时使用。/ --slot is not used with --resign-to.")
+                raise RepairError(
+                    "--slot 不能与重签名同时使用。/ --slot is not used with re-signing."
+                )
+            target_steam_id = (
+                validate_steam_id(args.resign_to)
+                if args.resign_to is not None
+                else choose_local_steam_id()
+            )
             output = args.output or save.with_name(f"{save.stem}_resigned.sl2")
-            report = resign_to_file(save, output, args.resign_to)
+            report = resign_to_file(save, output, target_steam_id)
             print(json.dumps(report, indent=2, ensure_ascii=False))
         else:
             save = choose_save(discover_saves(args.save)).resolve()
             if args.output is not None:
-                raise RepairError("--output 仅用于 --resign-to。/ --output is only valid with --resign-to.")
+                raise RepairError(
+                    "--output 仅用于 --resign 或 --resign-to。/ "
+                    "--output is only valid with --resign or --resign-to."
+                )
             data = save.read_bytes()
             if args.list_slots:
                 print_slot_summaries(data)
@@ -748,7 +789,7 @@ def main() -> int:
                 if args.verify:
                     verify_post_surrender(save, slot_index)
                 else:
-                    run(save, slot_index, args.assume_app_version)
+                    run(save, slot_index)
     except (RepairError, OSError, ValueError, EOFError) as exc:
         print(f"\n错误 / ERROR:\n{exc}", file=sys.stderr)
         exit_code = 1
