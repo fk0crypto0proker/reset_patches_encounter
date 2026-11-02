@@ -20,11 +20,11 @@ A one-file save repair tool for replaying Patches' first Murkwater Cave encounte
 
 - Windows / Steam
 - 标题画面 App Ver. 1.17.2
-- 存档版本 262
-- 第一个角色槽位（Slot 0）
+- 所选角色的存档版本 262
+- 任意已占用角色槽位（Slot 0-9）
 - Python 3.12
 
-其他版本或角色槽位请勿使用。
+版本 250、252 等旧角色可以重签名，但帕奇修改仍会拒绝执行，直到完成对应版本的实机验证。
 
 ### 使用方法
 
@@ -38,13 +38,19 @@ A one-file save repair tool for replaying Patches' first Murkwater Cave encounte
 python .\reset_patches_encounter.py
 ```
 
+脚本会列出角色；只有一个角色时自动选择，多个角色时输入 Slot 编号。也可直接指定：
+
+```powershell
+python .\reset_patches_encounter.py --slot 4
+```
+
 按提示输入 `1.17.2`。如果有多个 Steam 账号，再选择正确的存档。
 
 脚本会自动查找并验证存档、分别备份主档和 `.bak`、生成修复文件、自检并完成替换。**出现 `[3/4]` 后，不要启动游戏、强制关闭脚本或关闭电脑，直到显示 `[4/4]`。**
 
 ### 游戏内验证
 
-1. 启动游戏，进入第一个角色。
+1. 启动游戏，进入刚修复的角色。
 2. 前往蒙流洞窟并打开宝箱。
 3. 将帕奇打到约半血后立即停手。
 4. 等待投降台词，确认帕奇存活。
@@ -52,10 +58,29 @@ python .\reset_patches_encounter.py
 6. 运行只读验证：
 
 ```powershell
-python .\reset_patches_encounter.py --verify
+python .\reset_patches_encounter.py --slot 4 --verify
 ```
 
 看到“验证成功”才表示投降状态已经写入磁盘。
+
+### 查看角色和 SteamID 重签名
+
+只读列出所有角色槽：
+
+```powershell
+python .\reset_patches_encounter.py --list-slots
+```
+
+把外部存档重签名为目标 SteamID64，并输出为新文件：
+
+```powershell
+python .\reset_patches_encounter.py `
+  --save "C:\Users\你\Downloads\ER0000.sl2" `
+  --resign-to 7656119XXXXXXXXXX `
+  --output "C:\Users\你\Downloads\ER0000_resigned.sl2"
+```
+
+重签名会替换存档内全部旧 SteamID，重算并验证 10 个角色槽、UserData10 和 UserData11 的 MD5。来源文件不会被覆盖；输出旁会生成 `.resign.json` 报告。重签名文件仍应先备份并离线测试。
 
 ### 备份与回滚
 
@@ -94,11 +119,11 @@ Open chest -> Patches appears -> Fight -> Stop near half health -> Patches surre
 
 - Windows / Steam
 - Title-screen App Ver. 1.17.2
-- Save version 262
-- First character slot (Slot 0)
+- Save version 262 in the selected character
+- Any occupied character slot (Slot 0-9)
 - Python 3.12
 
-Do not use it with other versions or character slots.
+Older characters such as versions 250 and 252 can be re-signed, but Patches editing remains blocked until that version has been verified in game.
 
 ### Usage
 
@@ -112,13 +137,19 @@ Do not use it with other versions or character slots.
 python .\reset_patches_encounter.py
 ```
 
+The tool lists occupied characters. It automatically selects the only occupied slot, or asks for a Slot number when several exist. A slot can also be supplied directly:
+
+```powershell
+python .\reset_patches_encounter.py --slot 4
+```
+
 Type `1.17.2` when asked. If multiple Steam accounts are found, select the correct save.
 
 The script automatically finds and validates the save, backs up the main file and `.bak` separately, builds and verifies the repair, and installs both files. **After `[3/4]` appears, do not launch the game, force-close the script, or shut down the PC until `[4/4]` is shown.**
 
 ### Verify in game
 
-1. Launch the game and load the first character.
+1. Launch the game and load the repaired character.
 2. Enter Murkwater Cave and open the chest.
 3. Stop attacking Patches at approximately half health.
 4. Wait for the surrender dialogue and confirm that he survives.
@@ -126,10 +157,29 @@ The script automatically finds and validates the save, backs up the main file an
 6. Run the read-only verification:
 
 ```powershell
-python .\reset_patches_encounter.py --verify
+python .\reset_patches_encounter.py --slot 4 --verify
 ```
 
 The surrender state is confirmed on disk only when the script reports success.
+
+### List characters and re-sign SteamID
+
+List occupied character slots without modifying the save:
+
+```powershell
+python .\reset_patches_encounter.py --list-slots
+```
+
+Re-sign an external save to a target SteamID64 and write a separate output file:
+
+```powershell
+python .\reset_patches_encounter.py `
+  --save "C:\Users\you\Downloads\ER0000.sl2" `
+  --resign-to 7656119XXXXXXXXXX `
+  --output "C:\Users\you\Downloads\ER0000_resigned.sl2"
+```
+
+Re-signing replaces every embedded old SteamID and recalculates and verifies the MD5 for all ten character slots, UserData10, and UserData11. It never overwrites the source and writes a `.resign.json` report beside the output. Back up and test the result offline before installation.
 
 ### Backup and rollback
 

@@ -19,9 +19,19 @@ from pathlib import Path
 HEADER_SIZE = 0x300
 SLOT_SIZE = 0x280000
 SLOT_RECORD_SIZE = 0x10 + SLOT_SIZE
+SLOT_COUNT = 10
 GA_ITEMS_MAX = 0x1400
 SUPPORTED_SAVE_VERSION = 262
-SUPPORTED_SLOT = 0
+USER_DATA10_CHECKSUM_OFFSET = 0x19003A0
+USER_DATA10_DATA_OFFSET = 0x19003B0
+USER_DATA10_SIZE = 0x60000
+USER_DATA11_CHECKSUM_OFFSET = 0x19603B0
+USER_DATA11_DATA_OFFSET = USER_DATA11_CHECKSUM_OFFSET + 0x10
+PROFILE_NAME_START = 0x1901D0E
+PROFILE_NAME_STRIDE = 588
+PROFILE_NAME_SIZE = 32
+STEAMID64_MIN = 0x0110000100000000
+STEAMID64_MAX = STEAMID64_MIN + (1 << 32)
 ORIGIN_PROBE_START = 50_000
 ORIGIN_ZERO_RUN = 64
 ORIGIN_MIN_LEAD_ZEROS = 256
@@ -130,6 +140,19 @@ def validate_save_path(save: Path) -> None:
         )
 
 
+def validate_resign_source_path(save: Path) -> None:
+    if not save.is_file() or save.name.lower() != "er0000.sl2":
+        raise RepairError(f"无效的存档路径 / Invalid save path: {save}")
+
+
+def validate_steam_id(steam_id: int) -> int:
+    if not STEAMID64_MIN <= steam_id < STEAMID64_MAX:
+        raise RepairError(
+            f"无效的个人 SteamID64：{steam_id}。/ Invalid individual SteamID64."
+        )
+    return steam_id
+
+
 def prompt_user(message: str) -> str:
     try:
         return input(message).strip()
@@ -154,6 +177,182 @@ def choose_save(saves: list[Path]) -> Path:
         if answer.isdigit() and 1 <= int(answer) <= len(saves):
             return saves[int(answer) - 1]
         print("输入无效，请重试。/ Invalid selection, try again.")
+
+
+def slot_summaries(data: bytes) -> list[dict]:
+    summaries = []
+    for index in range(SLOT_COUNT):
+        record_start = HEADER_SIZE + index * SLOT_RECORD_SIZE
+        slot_start = record_start + 0x10
+        slot = data[slot_start:slot_start + SLOT_SIZE]
+        if len(slot) != SLOT_SIZE:
+            raise RepairError("存档槽位不完整。/ The save contains a truncated slot.")
+        name_start = PROFILE_NAME_START + index * PROFILE_NAME_STRIDE
+        raw_name = data[name_start:name_start + PROFILE_NAME_SIZE]
+        name = raw_name.decode("utf-16le", errors="replace").split("\0", 1)[0]
+        summaries.append({
+            "slot": index,
+            "name": name,
+            "version": u32(slot, 0),
+            "md5_valid": hashlib.md5(slot).digest() == data[record_start:slot_start],
+        })
+    return summaries
+
+
+def print_slot_summaries(data: bytes) -> list[dict]:
+    summaries = slot_summaries(data)
+    print("角色槽位 / Character slots:")
+    for entry in summaries:
+        if entry["version"] == 0:
+            continue
+        state = "MD5 OK" if entry["md5_valid"] else "MD5 INVALID"
+        print(
+            f"  Slot {entry['slot']}: {entry['name'] or '(unnamed)'} | "
+            f"version {entry['version']} | {state}"
+        )
+    return summaries
+
+
+def choose_slot(data: bytes, requested_slot: int | None) -> int:
+    summaries = print_slot_summaries(data)
+    occupied = [entry for entry in summaries if entry["version"] != 0]
+    if requested_slot is not None:
+        entry = summaries[requested_slot]
+        if entry["version"] == 0:
+            raise RepairError(f"Slot {requested_slot} 为空。/ The selected slot is empty.")
+        return requested_slot
+    if not occupied:
+        raise RepairError("存档中没有角色。/ The save contains no characters.")
+    if len(occupied) == 1:
+        selected = occupied[0]["slot"]
+        print(f"自动选择 Slot {selected}。/ Automatically selected Slot {selected}.")
+        return selected
+    while True:
+        answer = prompt_user("请输入 Slot 编号（0-9）/ Enter a Slot number (0-9): ")
+        if answer.isdigit() and 0 <= int(answer) < SLOT_COUNT:
+            selected = int(answer)
+            if summaries[selected]["version"] != 0:
+                return selected
+        print("槽位无效或为空，请重试。/ Invalid or empty slot; try again.")
+
+
+def checksum_status(data: bytes) -> list[dict]:
+    if data[:4] != b"BND4" or len(data) <= USER_DATA11_DATA_OFFSET:
+        raise RepairError("不是受支持的完整 PC BND4 存档。/ Not a supported complete PC BND4 save.")
+    entries = []
+    for index in range(SLOT_COUNT):
+        checksum_offset = HEADER_SIZE + index * SLOT_RECORD_SIZE
+        data_offset = checksum_offset + 0x10
+        payload = data[data_offset:data_offset + SLOT_SIZE]
+        entries.append({
+            "name": f"Slot {index}",
+            "valid": len(payload) == SLOT_SIZE
+            and hashlib.md5(payload).digest() == data[checksum_offset:data_offset],
+        })
+    user_data10 = data[
+        USER_DATA10_DATA_OFFSET:USER_DATA10_DATA_OFFSET + USER_DATA10_SIZE
+    ]
+    entries.append({
+        "name": "UserData10",
+        "valid": len(user_data10) == USER_DATA10_SIZE and hashlib.md5(user_data10).digest()
+        == data[USER_DATA10_CHECKSUM_OFFSET:USER_DATA10_DATA_OFFSET],
+    })
+    user_data11 = data[USER_DATA11_DATA_OFFSET:]
+    entries.append({
+        "name": "UserData11",
+        "valid": bool(user_data11) and hashlib.md5(user_data11).digest()
+        == data[USER_DATA11_CHECKSUM_OFFSET:USER_DATA11_DATA_OFFSET],
+    })
+    return entries
+
+
+def recalculate_all_checksums(data: bytearray) -> None:
+    for index in range(SLOT_COUNT):
+        checksum_offset = HEADER_SIZE + index * SLOT_RECORD_SIZE
+        data_offset = checksum_offset + 0x10
+        data[checksum_offset:data_offset] = hashlib.md5(
+            data[data_offset:data_offset + SLOT_SIZE]
+        ).digest()
+    data[USER_DATA10_CHECKSUM_OFFSET:USER_DATA10_DATA_OFFSET] = hashlib.md5(
+        data[USER_DATA10_DATA_OFFSET:USER_DATA10_DATA_OFFSET + USER_DATA10_SIZE]
+    ).digest()
+    data[USER_DATA11_CHECKSUM_OFFSET:USER_DATA11_DATA_OFFSET] = hashlib.md5(
+        data[USER_DATA11_DATA_OFFSET:]
+    ).digest()
+
+
+def find_all(data: bytes | bytearray, needle: bytes) -> list[int]:
+    offsets = []
+    start = 0
+    while True:
+        offset = data.find(needle, start)
+        if offset < 0:
+            return offsets
+        offsets.append(offset)
+        start = offset + len(needle)
+
+
+def embedded_steam_id(data: bytes) -> int:
+    if len(data) < USER_DATA10_DATA_OFFSET + 12:
+        raise RepairError("存档过短，无法读取 SteamID。/ Save is too short to read SteamID.")
+    return struct.unpack_from("<Q", data, USER_DATA10_DATA_OFFSET + 4)[0]
+
+
+def build_resigned_candidate(source: bytes, new_steam_id: int) -> tuple[bytes, dict]:
+    validate_steam_id(new_steam_id)
+    invalid = [entry["name"] for entry in checksum_status(source) if not entry["valid"]]
+    if invalid:
+        raise RepairError(f"输入存档校验无效，拒绝重签名：{invalid}")
+    old_steam_id = embedded_steam_id(source)
+    validate_steam_id(old_steam_id)
+    old_bytes = struct.pack("<Q", old_steam_id)
+    new_bytes = struct.pack("<Q", new_steam_id)
+    old_offsets = find_all(source, old_bytes)
+    if not old_offsets:
+        raise RepairError("未找到存档内 SteamID。/ Embedded SteamID was not found.")
+    data = bytearray(source)
+    for offset in old_offsets:
+        data[offset:offset + 8] = new_bytes
+    recalculate_all_checksums(data)
+    candidate = bytes(data)
+    invalid_after = [entry["name"] for entry in checksum_status(candidate) if not entry["valid"]]
+    if invalid_after:
+        raise RepairError(f"重签名候选校验失败：{invalid_after}")
+    if old_steam_id != new_steam_id and find_all(candidate, old_bytes):
+        raise RepairError("重签名后仍残留旧 SteamID。/ Old SteamID remains after resigning.")
+    new_offsets = find_all(candidate, new_bytes)
+    if old_steam_id != new_steam_id and new_offsets != old_offsets:
+        raise RepairError("重签名后的 SteamID 位置异常。/ Resigned SteamID offsets changed unexpectedly.")
+    report = {
+        "old_steamid64": old_steam_id,
+        "new_steamid64": new_steam_id,
+        "steamid_offsets": old_offsets,
+        "checksums_verified": True,
+        "slot_versions": [entry["version"] for entry in slot_summaries(candidate)],
+    }
+    return candidate, report
+
+
+def resign_to_file(source_path: Path, output_path: Path, new_steam_id: int) -> dict:
+    validate_resign_source_path(source_path)
+    source_path = source_path.resolve()
+    output_path = output_path.expanduser().resolve()
+    if output_path == source_path:
+        raise RepairError("重签名输出不能覆盖来源文件。/ Resign output must not overwrite the source.")
+    if output_path.exists():
+        raise RepairError(f"输出文件已存在，拒绝覆盖。/ Output already exists: {output_path}")
+    candidate, report = build_resigned_candidate(source_path.read_bytes(), new_steam_id)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    write_verified(output_path, candidate)
+    report.update({
+        "source": str(source_path),
+        "output": str(output_path),
+        "source_sha256": sha256(source_path),
+        "output_sha256": sha256(output_path),
+    })
+    report_path = output_path.with_suffix(output_path.suffix + ".resign.json")
+    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    return report
 
 
 def find_ga_items_end(slot: bytes | bytearray) -> int | None:
@@ -405,6 +604,12 @@ def install_candidate(candidate: bytes, main_save: Path, backup_save: Path, back
         if sha256(main_save) != expected_hash or sha256(backup_save) != expected_hash:
             raise RepairError("安装后哈希验证失败。/ Installed save verification failed.")
     except Exception as install_error:
+        if is_game_running():
+            raise RepairError(
+                "安装期间游戏被启动，已停止自动回滚，避免覆盖运行中的存档。请退出游戏后从备份恢复。\n"
+                "The game started during installation. Automatic rollback was stopped to avoid writing "
+                f"to a live save. Close the game and restore from: {backup_dir}\n{install_error}"
+            ) from install_error
         try:
             restore_backup(
                 main_save, backup_save, backup_dir, original_main_hash, original_bak_hash
@@ -427,10 +632,10 @@ def install_candidate(candidate: bytes, main_save: Path, backup_save: Path, back
     return expected_hash
 
 
-def verify_post_surrender(save: Path) -> None:
+def verify_post_surrender(save: Path, slot_index: int) -> None:
     validate_save_path(save)
-    print(f"正在验证 / Verifying: {save}")
-    _, _, slot, families = prepare_slot(save.read_bytes(), SUPPORTED_SLOT)
+    print(f"正在验证 / Verifying: {save} | Slot {slot_index}")
+    _, _, slot, families = prepare_slot(save.read_bytes(), slot_index)
     actual = {
         flag_id: flag_value(slot, flag_id, families)
         for flag_id in POST_SURRENDER_FLAGS
@@ -448,7 +653,7 @@ def verify_post_surrender(save: Path) -> None:
     print("验证成功：帕奇已存活并完成投降写回。/ Verified: Patches survived and the surrender state was saved.")
 
 
-def run(save: Path, confirmed_app_version: str | None = None) -> Path:
+def run(save: Path, slot_index: int, confirmed_app_version: str | None = None) -> Path:
     validate_save_path(save)
     backup_save = save.with_name("ER0000.sl2.bak")
     if not backup_save.is_file():
@@ -461,8 +666,11 @@ def run(save: Path, confirmed_app_version: str | None = None) -> Path:
         print(f"  {stat.st_size / 1024 / 1024:.1f} MiB | {modified} | SHA-256 {sha256(path)}")
     print("注意：.bak 会先被单独备份，再由主档生成的修复候选覆盖。")
     print("Note: .bak is backed up separately, then replaced with the candidate built from Main.")
-    print("脚本会验证 save version 262 和 Slot 0，但无法自动读取标题画面的 App Ver。")
-    print("The script verifies save version 262 and Slot 0, but cannot detect the title-screen App Ver.")
+    print(f"脚本会验证 save version 262 和 Slot {slot_index}，但无法自动读取标题画面的 App Ver。")
+    print(
+        f"The script verifies save version 262 and Slot {slot_index}, "
+        "but cannot detect the title-screen App Ver."
+    )
     version = confirmed_app_version or prompt_user(
         "请先确认标题画面显示 App Ver. 1.17.2，然后输入 1.17.2：\n"
         "Confirm the title screen says App Ver. 1.17.2, then type 1.17.2: "
@@ -471,8 +679,8 @@ def run(save: Path, confirmed_app_version: str | None = None) -> Path:
         raise RepairError("未确认 App Ver. 1.17.2，已取消。/ App Ver. 1.17.2 was not confirmed; cancelled.")
 
     print("正在验证主档与 .bak / Validating the main save and .bak...")
-    prepare_slot(save.read_bytes(), SUPPORTED_SLOT)
-    prepare_slot(backup_save.read_bytes(), SUPPORTED_SLOT)
+    prepare_slot(save.read_bytes(), slot_index)
+    prepare_slot(backup_save.read_bytes(), slot_index)
 
     root = save.parent.parent
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -480,7 +688,7 @@ def run(save: Path, confirmed_app_version: str | None = None) -> Path:
     print("[1/4] 正在备份并验证 / Backing up and verifying...")
     original_main_hash, original_bak_hash = create_backup(save, backup_save, backup_dir)
     print("[2/4] 正在生成并检查候选存档 / Building and checking candidate...")
-    candidate, report = build_candidate(save.read_bytes(), SUPPORTED_SLOT)
+    candidate, report = build_candidate(save.read_bytes(), slot_index)
     candidate_path = backup_dir / "ER0000_patches_reset.sl2"
     write_verified(candidate_path, candidate)
     report.update({
@@ -505,18 +713,42 @@ def run(save: Path, confirmed_app_version: str | None = None) -> Path:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Reset Patches' first Murkwater Cave encounter safely.")
-    parser.add_argument("--save", type=Path, help="Optional path to ER0000.sl2; normally found automatically.")
+    parser.add_argument("--save", type=Path, help="Optional source ER0000.sl2; normally found automatically.")
+    parser.add_argument("--slot", type=int, choices=range(SLOT_COUNT), help="Character Slot number (0-9).")
     parser.add_argument("--assume-app-version", choices=["1.17.2"], help="Caller assertion for the title-screen App Ver; the EXE is not inspected.")
-    parser.add_argument("--verify", action="store_true", help="Read only: verify the saved post-surrender state.")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--verify", action="store_true", help="Read only: verify the selected slot's post-surrender state.")
+    mode.add_argument("--list-slots", action="store_true", help="Read only: list occupied character slots and versions.")
+    mode.add_argument("--resign-to", type=int, metavar="STEAMID64", help="Create a separately re-signed save for this SteamID64.")
+    parser.add_argument("--output", type=Path, help="Output path for --resign-to; source is never overwritten.")
     args = parser.parse_args()
     exit_code = 0
     try:
         require_game_closed()
-        save = choose_save(discover_saves(args.save))
-        if args.verify:
-            verify_post_surrender(save)
+        if args.resign_to is not None:
+            save = (
+                args.save.expanduser().resolve()
+                if args.save is not None
+                else choose_save(discover_saves(None)).resolve()
+            )
+            if args.slot is not None:
+                raise RepairError("--slot 不能与 --resign-to 同时使用。/ --slot is not used with --resign-to.")
+            output = args.output or save.with_name(f"{save.stem}_resigned.sl2")
+            report = resign_to_file(save, output, args.resign_to)
+            print(json.dumps(report, indent=2, ensure_ascii=False))
         else:
-            run(save, args.assume_app_version)
+            save = choose_save(discover_saves(args.save)).resolve()
+            if args.output is not None:
+                raise RepairError("--output 仅用于 --resign-to。/ --output is only valid with --resign-to.")
+            data = save.read_bytes()
+            if args.list_slots:
+                print_slot_summaries(data)
+            else:
+                slot_index = choose_slot(data, args.slot)
+                if args.verify:
+                    verify_post_surrender(save, slot_index)
+                else:
+                    run(save, slot_index, args.assume_app_version)
     except (RepairError, OSError, ValueError, EOFError) as exc:
         print(f"\n错误 / ERROR:\n{exc}", file=sys.stderr)
         exit_code = 1
